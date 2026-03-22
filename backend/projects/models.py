@@ -1,6 +1,6 @@
 import uuid
 from decimal import Decimal
-from django.core.exceptions import ValidationError
+
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
@@ -14,13 +14,13 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
-class Client(models.Model):
+class Client(TimeStampedModel):
     name = models.CharField(max_length=150)
-    email = models.EmailField()
-    phone = models.CharField(max_length=30, blank=True)
     company = models.CharField(max_length=150, blank=True)
-    address = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    email = models.EmailField(blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    notes = models.TextField(blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -32,41 +32,33 @@ class Client(models.Model):
 
 
 class ProjectStatus(models.TextChoices):
-    DRAFT = "draft", "Draft"
-    IN_PROGRESS = "in_progress", "In Progress"
-    COMPLETED = "completed", "Completed"
-    DELAYED = "delayed", "Delayed"
-    BLOCKED = "blocked", "Blocked"
-    CANCELLED = "cancelled", "Cancelled"
-
-
-class StepStatus(models.TextChoices):
-    NOT_STARTED = "not_started", "Not Started"
-    IN_PROGRESS = "in_progress", "In Progress"
-    COMPLETED = "completed", "Completed"
-    DELAYED = "delayed", "Delayed"
-    BLOCKED = "blocked", "Blocked"
+    DRAFT = "draft", "Brouillon"
+    IN_PROGRESS = "in_progress", "En cours"
+    COMPLETED = "completed", "Terminé"
+    DELAYED = "delayed", "En retard"
+    BLOCKED = "blocked", "Bloqué"
+    CANCELLED = "cancelled", "Annulé"
 
 
 class Project(TimeStampedModel):
     client = models.ForeignKey(
         Client,
         on_delete=models.CASCADE,
-        related_name="projects"
-    )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="created_projects"
+        related_name="projects",
     )
     project_manager = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="managed_projects"
+        related_name="managed_projects",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_projects",
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
@@ -74,7 +66,7 @@ class Project(TimeStampedModel):
     status = models.CharField(
         max_length=20,
         choices=ProjectStatus.choices,
-        default=ProjectStatus.DRAFT
+        default=ProjectStatus.DRAFT,
     )
     cancellation_reason = models.TextField(blank=True)
     start_date = models.DateField(null=True, blank=True)
@@ -83,7 +75,7 @@ class Project(TimeStampedModel):
     progress_percentage = models.DecimalField(
         max_digits=5,
         decimal_places=2,
-        default=0.00
+        default=Decimal("0.00"),
     )
     is_blocked = models.BooleanField(default=False)
 
@@ -93,110 +85,103 @@ class Project(TimeStampedModel):
     def __str__(self):
         return self.title
 
-    def clean(self):
-        reason = (self.cancellation_reason or "").strip()
-
-        if self.status == ProjectStatus.CANCELLED and not reason:
-            raise ValidationError({
-                "cancellation_reason": "La cause d’annulation est obligatoire."
-            })
-
-        if self.status != ProjectStatus.CANCELLED:
-            self.cancellation_reason = ""
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-    def recalculate_progress_and_status(self):
-        steps = self.steps.all()
-        total_steps = steps.count()
-
-        if total_steps == 0:
-            progress = Decimal("0.00")
-        else:
-            completed_steps = steps.filter(status=StepStatus.COMPLETED).count()
-            progress = (Decimal(completed_steps) / Decimal(total_steps)) * Decimal("100")
-            progress = progress.quantize(Decimal("0.01"))
-
+    def recalculate_progress_and_status(self, save=True):
         if self.status == ProjectStatus.CANCELLED:
-            self.progress_percentage = progress
-            self.is_blocked = False
-            if not self.actual_end_date:
-                self.actual_end_date = timezone.localdate()
-            self.save(update_fields=[
-                "progress_percentage",
-                "is_blocked",
-                "actual_end_date",
-                "updated_at",
-            ])
+            if save:
+                self.save(
+                    update_fields=[
+                        "status",
+                        "cancellation_reason",
+                        "updated_at",
+                    ]
+                )
             return
+
+        steps = list(self.steps.all().order_by("step_order"))
+        total_steps = len(steps)
 
         if total_steps == 0:
             self.progress_percentage = Decimal("0.00")
-            self.status = ProjectStatus.DRAFT
             self.is_blocked = False
+            self.status = ProjectStatus.DRAFT
             self.actual_end_date = None
-            self.save(update_fields=[
-                "progress_percentage",
-                "status",
-                "is_blocked",
-                "actual_end_date",
-                "updated_at",
-            ])
+            if save:
+                self.save(
+                    update_fields=[
+                        "progress_percentage",
+                        "is_blocked",
+                        "status",
+                        "actual_end_date",
+                        "updated_at",
+                    ]
+                )
             return
 
-        completed_steps = steps.filter(status=StepStatus.COMPLETED).count()
-        blocked_exists = steps.filter(status=StepStatus.BLOCKED).exists()
-        delayed_exists = steps.filter(status=StepStatus.DELAYED).exists()
-        in_progress_exists = steps.filter(status=StepStatus.IN_PROGRESS).exists()
+        completed_steps = sum(1 for step in steps if step.status == ProjectStep.StepStatus.COMPLETED)
+        has_blocked = any(step.status == ProjectStep.StepStatus.BLOCKED for step in steps)
+        has_delayed = any(step.status == ProjectStep.StepStatus.DELAYED for step in steps)
+        has_in_progress = any(step.status == ProjectStep.StepStatus.IN_PROGRESS for step in steps)
+        has_started = any(
+            step.status in {
+                ProjectStep.StepStatus.IN_PROGRESS,
+                ProjectStep.StepStatus.COMPLETED,
+                ProjectStep.StepStatus.DELAYED,
+                ProjectStep.StepStatus.BLOCKED,
+            }
+            for step in steps
+        )
 
-        self.progress_percentage = progress
+        self.progress_percentage = (Decimal(completed_steps) / Decimal(total_steps)) * Decimal("100.00")
+        self.is_blocked = has_blocked
 
-        if blocked_exists:
-            self.status = ProjectStatus.BLOCKED
-            self.is_blocked = True
-            self.actual_end_date = None
-        elif completed_steps == total_steps:
+        if completed_steps == total_steps:
             self.status = ProjectStatus.COMPLETED
-            self.is_blocked = False
-            if not self.actual_end_date:
-                self.actual_end_date = timezone.localdate()
-        elif delayed_exists:
-            self.status = ProjectStatus.DELAYED
-            self.is_blocked = False
+            self.actual_end_date = self.actual_end_date or timezone.localdate()
+        elif has_blocked:
+            self.status = ProjectStatus.BLOCKED
             self.actual_end_date = None
-        elif in_progress_exists or completed_steps > 0:
+        elif has_delayed:
+            self.status = ProjectStatus.DELAYED
+            self.actual_end_date = None
+        elif has_in_progress or has_started:
             self.status = ProjectStatus.IN_PROGRESS
-            self.is_blocked = False
             self.actual_end_date = None
         else:
             self.status = ProjectStatus.DRAFT
-            self.is_blocked = False
             self.actual_end_date = None
 
-        self.save(update_fields=[
-            "progress_percentage",
-            "status",
-            "is_blocked",
-            "actual_end_date",
-            "updated_at",
-        ])
+        if save:
+            self.save(
+                update_fields=[
+                    "progress_percentage",
+                    "is_blocked",
+                    "status",
+                    "actual_end_date",
+                    "updated_at",
+                ]
+            )
 
 
 class ProjectStep(TimeStampedModel):
+    class StepStatus(models.TextChoices):
+        NOT_STARTED = "not_started", "Non démarrée"
+        IN_PROGRESS = "in_progress", "En cours"
+        COMPLETED = "completed", "Terminée"
+        DELAYED = "delayed", "En retard"
+        BLOCKED = "blocked", "Bloquée"
+
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
-        related_name="steps"
+        related_name="steps",
     )
     title = models.CharField(max_length=200)
     description = models.TextField(blank=True)
-    step_order = models.PositiveIntegerField()
+    step_order = models.PositiveIntegerField(default=1)
     status = models.CharField(
         max_length=20,
         choices=StepStatus.choices,
-        default=StepStatus.NOT_STARTED
+        default=StepStatus.NOT_STARTED,
     )
     status_reason = models.TextField(blank=True)
     planned_start_date = models.DateField(null=True, blank=True)
@@ -206,112 +191,79 @@ class ProjectStep(TimeStampedModel):
     client_visible = models.BooleanField(default=True)
 
     class Meta:
-        ordering = ["project", "step_order"]
-        unique_together = ("project", "step_order")
+        ordering = ["step_order"]
 
     def __str__(self):
-        return f"{self.project.title} - Step {self.step_order}: {self.title}"
+        return f"{self.project.title} - Étape {self.step_order}: {self.title}"
 
-    def clean(self):
-        reason = (self.status_reason or "").strip()
 
-        if self.status in [StepStatus.BLOCKED, StepStatus.DELAYED] and not reason:
-            raise ValidationError({
-                "status_reason": "La cause est obligatoire pour une étape bloquée ou en retard."
-            })
-
-        if self.status not in [StepStatus.BLOCKED, StepStatus.DELAYED]:
-            self.status_reason = ""
-
-    def save(self, *args, **kwargs):
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-class Comment(models.Model):
+class Comment(TimeStampedModel):
     step = models.ForeignKey(
         ProjectStep,
         on_delete=models.CASCADE,
-        related_name="comments"
+        related_name="comments",
     )
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="project_comments"
+        related_name="project_comments",
     )
     content = models.TextField()
     visible_to_client = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["created_at"]
+        ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Comment on {self.step.title}"
+        return f"Commentaire étape {self.step_id}"
 
 
 class Attachment(models.Model):
     step = models.ForeignKey(
         ProjectStep,
         on_delete=models.CASCADE,
-        related_name="attachments"
+        related_name="attachments",
     )
-    uploaded_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="uploaded_attachments"
-    )
-    file = models.FileField(upload_to="project_attachments/")
-    file_name = models.CharField(max_length=255, blank=True)
-    file_type = models.CharField(max_length=50, blank=True)
+    file = models.FileField(upload_to="attachments/%Y/%m/%d/")
+    file_name = models.CharField(max_length=255)
+    file_type = models.CharField(max_length=100, blank=True)
     visible_to_client = models.BooleanField(default=False)
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-uploaded_at"]
 
-    def save(self, *args, **kwargs):
-        if self.file and not self.file_name:
-            self.file_name = self.file.name.split("/")[-1]
-        super().save(*args, **kwargs)
-
     def __str__(self):
-        return self.file_name or "Attachment"
+        return self.file_name or f"Attachment {self.pk}"
 
 
-class ProjectAccessLink(models.Model):
+class ProjectAccessLink(TimeStampedModel):
     project = models.OneToOneField(
         Project,
         on_delete=models.CASCADE,
-        related_name="access_link"
+        related_name="access_link",
     )
     token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     is_active = models.BooleanField(default=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Access link for {self.project.title}"
+        return f"Accès public - {self.project.title}"
 
 
 class AccessLog(models.Model):
     access_link = models.ForeignKey(
         ProjectAccessLink,
         on_delete=models.CASCADE,
-        related_name="access_logs"
+        related_name="access_logs",
     )
-    accessed_at = models.DateTimeField(auto_now_add=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True)
+    accessed_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-accessed_at"]
 
     def __str__(self):
-        return f"Access on {self.accessed_at}"
+        return f"Accès {self.access_link.project.title} - {self.accessed_at}"

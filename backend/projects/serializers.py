@@ -1,10 +1,9 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Attachment, Client, Comment, Project, ProjectStep, ProjectStatus, StepStatus
+from .models import Attachment, Client, Comment, Project, ProjectStep, ProjectStatus
 
 User = get_user_model()
-
 
 
 def validate_step_status_reason(serializer, attrs):
@@ -13,15 +12,16 @@ def validate_step_status_reason(serializer, attrs):
 
     reason = (reason or "").strip()
 
-    if status in [StepStatus.BLOCKED, StepStatus.DELAYED] and not reason:
+    if status in [ProjectStep.StepStatus.BLOCKED, ProjectStep.StepStatus.DELAYED] and not reason:
         raise serializers.ValidationError({
             "status_reason": "La cause est obligatoire pour une étape bloquée ou en retard."
         })
 
-    if status not in [StepStatus.BLOCKED, StepStatus.DELAYED]:
+    if status not in [ProjectStep.StepStatus.BLOCKED, ProjectStep.StepStatus.DELAYED]:
         attrs["status_reason"] = ""
 
     return attrs
+
 
 def validate_project_cancellation(serializer, attrs):
     status = attrs.get("status", getattr(serializer.instance, "status", None))
@@ -41,6 +41,7 @@ def validate_project_cancellation(serializer, attrs):
         attrs["cancellation_reason"] = ""
 
     return attrs
+
 
 class PublicCommentSerializer(serializers.ModelSerializer):
     author_name = serializers.SerializerMethodField()
@@ -64,9 +65,128 @@ class PublicAttachmentSerializer(serializers.ModelSerializer):
         fields = ["id", "file_name", "file_type", "file_url", "uploaded_at"]
 
     def get_file_url(self, obj):
-        request = self.context.get("request")
-        if obj.file and request:
-            return request.build_absolute_uri(obj.file.url)
+        if obj.file:
+            return obj.file.url
+        return None
+
+
+class InternalCommentSerializer(serializers.ModelSerializer):
+    author_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Comment
+        fields = [
+            "id",
+            "content",
+            "visible_to_client",
+            "author_name",
+            "created_at",
+        ]
+
+    def get_author_name(self, obj):
+        if obj.author:
+            full_name = f"{obj.author.first_name} {obj.author.last_name}".strip()
+            return full_name or obj.author.username
+        return "Utilisateur interne"
+
+
+class StepCommentCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Comment
+        fields = [
+            "id",
+            "content",
+            "visible_to_client",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+    def validate_content(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Le commentaire ne peut pas être vide.")
+        return value
+
+
+class InternalCommentUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Comment
+        fields = [
+            "id",
+            "content",
+            "visible_to_client",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+    def validate_content(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Le commentaire ne peut pas être vide.")
+        return value
+
+
+class InternalAttachmentSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Attachment
+        fields = [
+            "id",
+            "file_name",
+            "file_type",
+            "file_url",
+            "visible_to_client",
+            "uploaded_at",
+        ]
+
+    def get_file_url(self, obj):
+        if obj.file:
+            return obj.file.url
+        return None
+
+
+class StepAttachmentCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Attachment
+        fields = [
+            "id",
+            "file",
+            "visible_to_client",
+            "uploaded_at",
+        ]
+        read_only_fields = ["id", "uploaded_at"]
+
+    def validate_file(self, value):
+        if not value:
+            raise serializers.ValidationError("Le fichier est obligatoire.")
+        return value
+
+
+class AttachmentVisibilityUpdateSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Attachment
+        fields = [
+            "id",
+            "file_name",
+            "file_type",
+            "file_url",
+            "visible_to_client",
+            "uploaded_at",
+        ]
+        read_only_fields = [
+            "id",
+            "file_name",
+            "file_type",
+            "file_url",
+            "uploaded_at",
+        ]
+
+    def get_file_url(self, obj):
+        if obj.file:
+            return obj.file.url
         return None
 
 
@@ -139,6 +259,9 @@ class PublicProjectSerializer(serializers.ModelSerializer):
 
 
 class InternalProjectStepSerializer(serializers.ModelSerializer):
+    comments = serializers.SerializerMethodField()
+    attachments = serializers.SerializerMethodField()
+
     class Meta:
         model = ProjectStep
         fields = [
@@ -153,9 +276,23 @@ class InternalProjectStepSerializer(serializers.ModelSerializer):
             "actual_start_date",
             "actual_end_date",
             "client_visible",
+            "comments",
+            "attachments",
             "created_at",
             "updated_at",
         ]
+
+    def get_comments(self, obj):
+        queryset = obj.comments.select_related("author").order_by("-created_at")
+        return InternalCommentSerializer(queryset, many=True).data
+
+    def get_attachments(self, obj):
+        queryset = obj.attachments.order_by("-uploaded_at")
+        return InternalAttachmentSerializer(
+            queryset,
+            many=True,
+            context=self.context
+        ).data
 
 
 class InternalProjectListSerializer(serializers.ModelSerializer):
@@ -193,8 +330,10 @@ class InternalProjectListSerializer(serializers.ModelSerializer):
 class InternalProjectDetailSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source="client.name", read_only=True)
     client_company = serializers.CharField(source="client.company", read_only=True)
+    client_email = serializers.CharField(source="client.email", read_only=True)
+    client_phone = serializers.CharField(source="client.phone", read_only=True)
     steps = InternalProjectStepSerializer(many=True, read_only=True)
-    access_token = serializers.UUIDField(source="access_link.token", read_only=True)
+    access_token = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -214,6 +353,8 @@ class InternalProjectDetailSerializer(serializers.ModelSerializer):
             "client",
             "client_name",
             "client_company",
+            "client_email",
+            "client_phone",
             "created_by",
             "project_manager",
             "steps",
@@ -221,6 +362,13 @@ class InternalProjectDetailSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["created_by"]
+
+    def get_access_token(self, obj):
+        access_link = getattr(obj, "access_link", None)
+        if access_link:
+            return str(access_link.token)
+        return None
+
 
 class ProjectStepCreateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -273,11 +421,14 @@ class InternalProjectCreateUpdateSerializer(serializers.ModelSerializer):
                 step_data["step_order"] = index
             ProjectStep.objects.create(project=project, **step_data)
 
+        project.recalculate_progress_and_status()
         return project
 
     def update(self, instance, validated_data):
         validated_data.pop("steps", None)
-        return super().update(instance, validated_data)
+        project = super().update(instance, validated_data)
+        return project
+
 
 class InternalProjectStepUpdateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -323,17 +474,48 @@ class ProjectStepManageSerializer(serializers.ModelSerializer):
         return validate_step_status_reason(self, attrs)
 
 
-class ClientOptionSerializer(serializers.ModelSerializer):
+class ClientListSerializer(serializers.ModelSerializer):
     label = serializers.SerializerMethodField()
 
     class Meta:
         model = Client
-        fields = ["id", "name", "company", "label"]
+        fields = [
+            "id",
+            "name",
+            "company",
+            "email",
+            "phone",
+            "address",
+            "notes",
+            "label",
+            "created_at",
+            "updated_at",
+        ]
 
     def get_label(self, obj):
         if obj.company:
             return f"{obj.name} - {obj.company}"
         return obj.name
+
+
+class ClientCreateUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = [
+            "id",
+            "name",
+            "company",
+            "email",
+            "phone",
+            "address",
+            "notes",
+        ]
+
+    def validate_name(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Le nom du client est obligatoire.")
+        return value
 
 
 class InternalUserOptionSerializer(serializers.ModelSerializer):
