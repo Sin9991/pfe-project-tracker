@@ -6,7 +6,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AccessLog, Attachment, Client, Comment, Project, ProjectAccessLink, ProjectStep, ProjectStatus
+from .models import AccessLog, Attachment, Client, Comment, Project, ProjectAccessLink, ProjectStep, ProjectStatus, log_project_activity
 from .serializers import (
     AttachmentVisibilityUpdateSerializer,
     ClientCreateUpdateSerializer,
@@ -70,8 +70,15 @@ class ProjectStepCreateForProjectAPIView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         project = generics.get_object_or_404(Project, pk=self.kwargs["project_id"])
-        serializer.save(project=project)
+        step = serializer.save(project=project)
         project.recalculate_progress_and_status()
+
+        log_project_activity(
+            project=project,
+            action_type="step_created",
+            message=f"Étape créée : {step.title}",
+            user=self.request.user,
+        )
 
 
 class DashboardAPIView(APIView):
@@ -210,7 +217,14 @@ class InternalProjectListCreateView(generics.ListCreateAPIView):
         return InternalProjectCreateUpdateSerializer
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        project = serializer.save(created_by=self.request.user)
+
+        log_project_activity(
+            project=project,
+            action_type="project_created",
+            message=f"Projet créé : {project.title}",
+            user=self.request.user,
+        )
 
 
 class InternalProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -232,6 +246,38 @@ class InternalProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
             return InternalProjectCreateUpdateSerializer
         return InternalProjectDetailSerializer
 
+    def get_queryset(self):
+        return Project.objects.select_related(
+            "client",
+            "project_manager",
+            "created_by"
+        ).prefetch_related(
+            "steps",
+            "steps__comments__author",
+            "steps__attachments",
+            "activities__user",
+        )
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        old_status = instance.status
+        old_title = instance.title
+
+        project = serializer.save()
+
+        if project.status == ProjectStatus.CANCELLED and old_status != ProjectStatus.CANCELLED:
+            message = f"Projet annulé. Cause : {project.cancellation_reason or 'Non précisée'}"
+            action_type = "project_cancelled"
+        else:
+            message = f"Projet mis à jour : {old_title}"
+            action_type = "project_updated"
+
+        log_project_activity(
+            project=project,
+            action_type=action_type,
+            message=message,
+            user=self.request.user,
+        )
 
 class InternalProjectStepDetailUpdateView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -239,11 +285,32 @@ class InternalProjectStepDetailUpdateView(generics.RetrieveUpdateDestroyAPIView)
     queryset = ProjectStep.objects.select_related("project")
 
     def perform_update(self, serializer):
+        instance = self.get_object()
+        old_status = instance.status
+        old_title = instance.title
+
         step = serializer.save()
         step.project.recalculate_progress_and_status()
 
+        if old_status != step.status:
+            message = (
+                f"Étape modifiée : {old_title} "
+                f"(statut : {old_status} → {step.status})"
+            )
+        else:
+            message = f"Étape modifiée : {old_title}"
+
+        log_project_activity(
+            project=step.project,
+            action_type="step_updated",
+            message=message,
+            user=self.request.user,
+        )
+
     def perform_destroy(self, instance):
         project = instance.project
+        step_title = instance.title
+
         instance.delete()
 
         remaining_steps = project.steps.order_by("step_order")
@@ -253,6 +320,13 @@ class InternalProjectStepDetailUpdateView(generics.RetrieveUpdateDestroyAPIView)
                 step.save(update_fields=["step_order", "updated_at"])
 
         project.recalculate_progress_and_status()
+
+        log_project_activity(
+            project=project,
+            action_type="step_deleted",
+            message=f"Étape supprimée : {step_title}",
+            user=self.request.user,
+        )
 
 
 class StepCommentCreateAPIView(generics.CreateAPIView):
@@ -267,13 +341,42 @@ class StepCommentCreateAPIView(generics.CreateAPIView):
                 "detail": "Impossible d’ajouter un commentaire à un projet annulé."
             })
 
-        serializer.save(step=step, author=self.request.user)
+        comment = serializer.save(step=step, author=self.request.user)
+
+        log_project_activity(
+            project=step.project,
+            action_type="comment_created",
+            message=f"Commentaire ajouté sur l’étape : {step.title}",
+            user=self.request.user,
+        )
 
 
 class CommentDetailUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = InternalCommentUpdateSerializer
     queryset = Comment.objects.select_related("author", "step", "step__project")
+
+    def perform_update(self, serializer):
+        comment = serializer.save()
+
+        log_project_activity(
+            project=comment.step.project,
+            action_type="comment_updated",
+            message=f"Commentaire modifié sur l’étape : {comment.step.title}",
+            user=self.request.user,
+        )
+
+    def perform_destroy(self, instance):
+        project = instance.step.project
+        step_title = instance.step.title
+        instance.delete()
+
+        log_project_activity(
+            project=project,
+            action_type="comment_deleted",
+            message=f"Commentaire supprimé sur l’étape : {step_title}",
+            user=self.request.user,
+        )
 
 
 class StepAttachmentCreateAPIView(generics.CreateAPIView):
@@ -289,10 +392,17 @@ class StepAttachmentCreateAPIView(generics.CreateAPIView):
             })
 
         uploaded_file = self.request.FILES.get("file")
-        serializer.save(
+        attachment = serializer.save(
             step=step,
             file_name=uploaded_file.name if uploaded_file else "",
             file_type=getattr(uploaded_file, "content_type", "") or "",
+        )
+
+        log_project_activity(
+            project=step.project,
+            action_type="attachment_created",
+            message=f"Pièce jointe ajoutée : {attachment.file_name or 'Fichier'}",
+            user=self.request.user,
         )
 
 
@@ -300,3 +410,36 @@ class AttachmentDetailUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView)
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = AttachmentVisibilityUpdateSerializer
     queryset = Attachment.objects.select_related("step", "step__project")
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        old_visibility = instance.visible_to_client
+
+        attachment = serializer.save()
+
+        if old_visibility != attachment.visible_to_client:
+            message = (
+                f"Visibilité modifiée pour la pièce jointe : {attachment.file_name} "
+                f"({'visible client' if attachment.visible_to_client else 'non visible client'})"
+            )
+        else:
+            message = f"Pièce jointe modifiée : {attachment.file_name}"
+
+        log_project_activity(
+            project=attachment.step.project,
+            action_type="attachment_updated",
+            message=message,
+            user=self.request.user,
+        )
+
+    def perform_destroy(self, instance):
+        project = instance.step.project
+        file_name = instance.file_name
+        instance.delete()
+
+        log_project_activity(
+            project=project,
+            action_type="attachment_deleted",
+            message=f"Pièce jointe supprimée : {file_name}",
+            user=self.request.user,
+        )

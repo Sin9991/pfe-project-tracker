@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from .models import Attachment, Client, Comment, Project, ProjectStep, ProjectStatus
+from .models import Attachment, Client, Comment, Project, ProjectStep, ProjectStatus, ProjectActivity
 
 User = get_user_model()
 
@@ -326,6 +326,24 @@ class InternalProjectListSerializer(serializers.ModelSerializer):
             return full_name or obj.project_manager.username
         return None
 
+class ProjectActivitySerializer(serializers.ModelSerializer):
+    user_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProjectActivity
+        fields = [
+            "id",
+            "action_type",
+            "message",
+            "user_label",
+            "created_at",
+        ]
+
+    def get_user_label(self, obj):
+        if obj.user:
+            full_name = f"{obj.user.first_name} {obj.user.last_name}".strip()
+            return full_name or obj.user.username
+        return "Système"
 
 class InternalProjectDetailSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source="client.name", read_only=True)
@@ -334,6 +352,7 @@ class InternalProjectDetailSerializer(serializers.ModelSerializer):
     client_phone = serializers.CharField(source="client.phone", read_only=True)
     steps = InternalProjectStepSerializer(many=True, read_only=True)
     access_token = serializers.SerializerMethodField()
+    activities = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
@@ -358,6 +377,7 @@ class InternalProjectDetailSerializer(serializers.ModelSerializer):
             "created_by",
             "project_manager",
             "steps",
+            "activities",
             "created_at",
             "updated_at",
         ]
@@ -368,6 +388,10 @@ class InternalProjectDetailSerializer(serializers.ModelSerializer):
         if access_link:
             return str(access_link.token)
         return None
+
+    def get_activities(self, obj):
+        queryset = obj.activities.select_related("user").all()[:30]
+        return ProjectActivitySerializer(queryset, many=True).data
 
 
 class ProjectStepCreateSerializer(serializers.ModelSerializer):

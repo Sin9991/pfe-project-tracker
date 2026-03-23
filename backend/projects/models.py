@@ -267,3 +267,52 @@ class AccessLog(models.Model):
 
     def __str__(self):
         return f"Accès {self.access_link.project.title} - {self.accessed_at}"
+
+class ProjectActivity(TimeStampedModel):
+    ACTION_CHOICES = [
+        ("project_created", "Projet créé"),
+        ("project_updated", "Projet modifié"),
+        ("project_cancelled", "Projet annulé"),
+        ("step_created", "Étape créée"),
+        ("step_updated", "Étape modifiée"),
+        ("step_deleted", "Étape supprimée"),
+        ("comment_created", "Commentaire ajouté"),
+        ("comment_updated", "Commentaire modifié"),
+        ("comment_deleted", "Commentaire supprimé"),
+        ("attachment_created", "Pièce jointe ajoutée"),
+        ("attachment_updated", "Pièce jointe modifiée"),
+        ("attachment_deleted", "Pièce jointe supprimée"),
+    ]
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="activities",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="project_activities",
+    )
+    action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
+    message = models.TextField()
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.project.title} - {self.action_type} - {self.created_at}"
+
+
+def log_project_activity(project, action_type, message, user=None):
+    if not project:
+        return None
+
+    return ProjectActivity.objects.create(
+        project=project,
+        user=user,
+        action_type=action_type,
+        message=message,
+    )
