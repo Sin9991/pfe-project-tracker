@@ -1,6 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-
+from django.contrib.auth.models import Group
 from .models import Attachment, Client, Comment, Project, ProjectStep, ProjectStatus, ProjectActivity
 
 User = get_user_model()
@@ -552,3 +552,136 @@ class InternalUserOptionSerializer(serializers.ModelSerializer):
     def get_label(self, obj):
         full_name = f"{obj.first_name} {obj.last_name}".strip()
         return full_name or obj.username
+
+ROLE_CHOICES = [
+    ("admin", "Admin"),
+    ("manager", "Gestionnaire"),
+    ("viewer", "Lecture seule"),
+]
+
+
+def get_user_role(user):
+    for role, _label in ROLE_CHOICES:
+        if user.groups.filter(name=role).exists():
+            return role
+    return "viewer"
+
+
+def apply_user_role(user, role):
+    role_names = [choice[0] for choice in ROLE_CHOICES]
+    Group.objects.get_or_create(name=role)
+
+    user.groups.remove(*user.groups.filter(name__in=role_names))
+    group = Group.objects.get(name=role)
+    user.groups.add(group)
+
+    if role == "admin":
+        user.is_staff = True
+    else:
+        user.is_staff = False
+
+    user.save(update_fields=["is_staff"])
+
+
+class AuthMeSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
+    label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "role",
+            "label",
+        ]
+
+    def get_role(self, obj):
+        return get_user_role(obj)
+
+    def get_label(self, obj):
+        full_name = f"{obj.first_name} {obj.last_name}".strip()
+        return full_name or obj.username
+
+
+class AdminUserManagementSerializer(serializers.ModelSerializer):
+    role = serializers.ChoiceField(choices=[choice[0] for choice in ROLE_CHOICES], required=False)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    label = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            "id",
+            "username",
+            "email",
+            "first_name",
+            "last_name",
+            "password",
+            "is_active",
+            "role",
+            "label",
+        ]
+
+    def get_label(self, obj):
+        full_name = f"{obj.first_name} {obj.last_name}".strip()
+        return full_name or obj.username
+
+    def validate_username(self, value):
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("Le nom d’utilisateur est obligatoire.")
+        return value
+
+    def validate(self, attrs):
+        if self.instance is None and not attrs.get("password"):
+            raise serializers.ValidationError({
+                "password": "Le mot de passe est obligatoire à la création."
+            })
+        return attrs
+
+    def create(self, validated_data):
+        role = validated_data.pop("role", "viewer")
+        password = validated_data.pop("password")
+
+        user = User.objects.create_user(
+            username=validated_data["username"],
+            email=validated_data.get("email", ""),
+            password=password,
+            first_name=validated_data.get("first_name", ""),
+            last_name=validated_data.get("last_name", ""),
+        )
+
+        user.is_active = validated_data.get("is_active", True)
+        user.save(update_fields=["is_active"])
+
+        apply_user_role(user, role)
+        return user
+
+    def update(self, instance, validated_data):
+        role = validated_data.pop("role", None)
+        password = validated_data.pop("password", None)
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+
+        if role:
+            apply_user_role(instance, role)
+
+        return instance
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["role"] = get_user_role(instance)
+        return data

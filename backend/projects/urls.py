@@ -14,9 +14,22 @@ from .views import (
     PublicProjectDetailView,
     StepAttachmentCreateAPIView,
     StepCommentCreateAPIView,
+    AdminUserDetailAPIView,
+    AdminUserListCreateAPIView,
+    CSRFCookieView,
+    CurrentUserAPIView,
+    LoginAPIView,
+    LogoutAPIView,
 )
 
 urlpatterns = [
+    path("auth/csrf/", CSRFCookieView.as_view(), name="auth-csrf"),
+    path("auth/login/", LoginAPIView.as_view(), name="auth-login"),
+    path("auth/logout/", LogoutAPIView.as_view(), name="auth-logout"),
+    path("auth/me/", CurrentUserAPIView.as_view(), name="auth-me"),
+
+    path("admin/users/", AdminUserListCreateAPIView.as_view(), name="admin-user-list-create"),
+    path("admin/users/<int:pk>/", AdminUserDetailAPIView.as_view(), name="admin-user-detail"),
     path("public/project/<uuid:token>/", PublicProjectDetailView.as_view(), name="public-project-detail"),
 
     path("dashboard/", DashboardAPIView.as_view(), name="dashboard"),

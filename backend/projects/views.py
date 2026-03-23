@@ -5,6 +5,10 @@ from rest_framework import generics, permissions, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.contrib.auth import authenticate, login, logout
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .models import AccessLog, Attachment, Client, Comment, Project, ProjectAccessLink, ProjectStep, ProjectStatus, log_project_activity
 from .serializers import (
@@ -21,10 +25,56 @@ from .serializers import (
     PublicProjectSerializer,
     StepAttachmentCreateSerializer,
     StepCommentCreateSerializer,
+    AdminUserManagementSerializer,
+    AuthMeSerializer,
 )
 
 User = get_user_model()
 
+def user_has_group(user, group_name):
+    return bool(user and user.is_authenticated and user.groups.filter(name=group_name).exists())
+
+
+def is_superadmin(user):
+    return bool(user and user.is_authenticated and user.is_superuser)
+
+
+def is_admin_role(user):
+    return is_superadmin(user) or user_has_group(user, "admin")
+
+
+def is_manager_role(user):
+    return user_has_group(user, "manager")
+
+
+def is_viewer_role(user):
+    return user_has_group(user, "viewer")
+
+
+def is_internal_writer(user):
+    return is_admin_role(user) or is_manager_role(user)
+
+
+def get_project_from_object(obj):
+    if isinstance(obj, Project):
+        return obj
+    if isinstance(obj, ProjectStep):
+        return obj.project
+    if isinstance(obj, Comment):
+        return obj.step.project
+    if isinstance(obj, Attachment):
+        return obj.step.project
+    return None
+
+
+def can_modify_project(user, project):
+    if is_admin_role(user):
+        return True
+
+    if is_manager_role(user):
+        return project.project_manager_id == user.id
+
+    return False
 
 class PublicProjectDetailView(APIView):
     authentication_classes = []
@@ -64,21 +114,6 @@ class PublicProjectDetailView(APIView):
         return request.META.get("REMOTE_ADDR")
 
 
-class ProjectStepCreateForProjectAPIView(generics.CreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
-    serializer_class = ProjectStepManageSerializer
-
-    def perform_create(self, serializer):
-        project = generics.get_object_or_404(Project, pk=self.kwargs["project_id"])
-        step = serializer.save(project=project)
-        project.recalculate_progress_and_status()
-
-        log_project_activity(
-            project=project,
-            action_type="step_created",
-            message=f"Étape créée : {step.title}",
-            user=self.request.user,
-        )
 
 
 class DashboardAPIView(APIView):
@@ -123,9 +158,46 @@ class DashboardAPIView(APIView):
 
         return Response(data, status=status.HTTP_200_OK)
 
+class IsAuthenticatedReadOnlyOrAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        if request.method in permissions.SAFE_METHODS:
+            return True
+
+        return is_admin_role(request.user)
+
+
+class IsProjectRolePermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        if request.method in permissions.SAFE_METHODS:
+            return True
+
+        return is_internal_writer(request.user)
+
+    def has_object_permission(self, request, view, obj):
+        project = get_project_from_object(obj)
+
+        if not project:
+            return False
+
+        if is_admin_role(request.user):
+            return True
+
+        if is_manager_role(request.user):
+            return project.project_manager_id == request.user.id
+
+        if request.method in permissions.SAFE_METHODS and is_viewer_role(request.user):
+            return True
+
+        return False
 
 class ClientListAPIView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticatedReadOnlyOrAdmin]
 
     def get_queryset(self):
         queryset = Client.objects.all().order_by("name")
@@ -148,7 +220,7 @@ class ClientListAPIView(generics.ListCreateAPIView):
 
 
 class ClientDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAuthenticatedReadOnlyOrAdmin]
     queryset = Client.objects.all().order_by("name")
     serializer_class = ClientCreateUpdateSerializer
 
@@ -158,11 +230,16 @@ class InternalUserListAPIView(generics.ListAPIView):
     serializer_class = InternalUserOptionSerializer
 
     def get_queryset(self):
-        return User.objects.filter(is_staff=True).order_by("username")
+        queryset = User.objects.filter(is_active=True).order_by("username")
+
+        if is_admin_role(self.request.user):
+            return queryset
+
+        return queryset.filter(id=self.request.user.id)
 
 
 class InternalProjectListCreateView(generics.ListCreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
 
     def get_queryset(self):
         queryset = Project.objects.select_related(
@@ -170,6 +247,9 @@ class InternalProjectListCreateView(generics.ListCreateAPIView):
             "project_manager",
             "created_by"
         ).all()
+
+        if is_manager_role(self.request.user):
+            queryset = queryset.filter(project_manager=self.request.user)
 
         q = self.request.query_params.get("q", "").strip()
         status_filter = self.request.query_params.get("status", "").strip()
@@ -192,7 +272,7 @@ class InternalProjectListCreateView(generics.ListCreateAPIView):
         if client_filter:
             queryset = queryset.filter(client_id=client_filter)
 
-        if manager_filter:
+        if manager_filter and is_admin_role(self.request.user):
             queryset = queryset.filter(project_manager_id=manager_filter)
 
         ordering_map = {
@@ -217,7 +297,20 @@ class InternalProjectListCreateView(generics.ListCreateAPIView):
         return InternalProjectCreateUpdateSerializer
 
     def perform_create(self, serializer):
-        project = serializer.save(created_by=self.request.user)
+        requested_manager = serializer.validated_data.get("project_manager")
+
+        if is_manager_role(self.request.user):
+            if requested_manager and requested_manager != self.request.user:
+                raise PermissionDenied(
+                    "Un gestionnaire ne peut créer qu’un projet qui lui est affecté."
+                )
+
+            project = serializer.save(
+                created_by=self.request.user,
+                project_manager=self.request.user,
+            )
+        else:
+            project = serializer.save(created_by=self.request.user)
 
         log_project_activity(
             project=project,
@@ -227,27 +320,12 @@ class InternalProjectListCreateView(generics.ListCreateAPIView):
         )
 
 
+
 class InternalProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
 
     def get_queryset(self):
-        return Project.objects.select_related(
-            "client",
-            "project_manager",
-            "created_by"
-        ).prefetch_related(
-            "steps",
-            "steps__comments__author",
-            "steps__attachments",
-        )
-
-    def get_serializer_class(self):
-        if self.request.method in ["PUT", "PATCH"]:
-            return InternalProjectCreateUpdateSerializer
-        return InternalProjectDetailSerializer
-
-    def get_queryset(self):
-        return Project.objects.select_related(
+        queryset = Project.objects.select_related(
             "client",
             "project_manager",
             "created_by"
@@ -258,10 +336,28 @@ class InternalProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
             "activities__user",
         )
 
+        if is_manager_role(self.request.user):
+            queryset = queryset.filter(project_manager=self.request.user)
+
+        return queryset
+
+    def get_serializer_class(self):
+        if self.request.method in ["PUT", "PATCH"]:
+            return InternalProjectCreateUpdateSerializer
+        return InternalProjectDetailSerializer
+
     def perform_update(self, serializer):
         instance = self.get_object()
         old_status = instance.status
         old_title = instance.title
+
+        requested_manager = serializer.validated_data.get("project_manager")
+
+        if is_manager_role(self.request.user):
+            if requested_manager and requested_manager != self.request.user:
+                raise PermissionDenied(
+                    "Un gestionnaire ne peut pas réaffecter le projet à un autre utilisateur."
+                )
 
         project = serializer.save()
 
@@ -279,8 +375,28 @@ class InternalProjectDetailView(generics.RetrieveUpdateDestroyAPIView):
             user=self.request.user,
         )
 
+class ProjectStepCreateForProjectAPIView(generics.CreateAPIView):
+    permission_classes = [IsProjectRolePermission]
+    serializer_class = ProjectStepManageSerializer
+
+    def perform_create(self, serializer):
+        project = generics.get_object_or_404(Project, pk=self.kwargs["project_id"])
+
+        if not can_modify_project(self.request.user, project):
+            raise PermissionDenied("Vous ne pouvez pas modifier ce projet.")
+
+        step = serializer.save(project=project)
+        project.recalculate_progress_and_status()
+
+        log_project_activity(
+            project=project,
+            action_type="step_created",
+            message=f"Étape créée : {step.title}",
+            user=self.request.user,
+        )
+
 class InternalProjectStepDetailUpdateView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
     serializer_class = InternalProjectStepUpdateSerializer
     queryset = ProjectStep.objects.select_related("project")
 
@@ -330,7 +446,7 @@ class InternalProjectStepDetailUpdateView(generics.RetrieveUpdateDestroyAPIView)
 
 
 class StepCommentCreateAPIView(generics.CreateAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
     serializer_class = StepCommentCreateSerializer
 
     def perform_create(self, serializer):
@@ -341,7 +457,10 @@ class StepCommentCreateAPIView(generics.CreateAPIView):
                 "detail": "Impossible d’ajouter un commentaire à un projet annulé."
             })
 
-        comment = serializer.save(step=step, author=self.request.user)
+        if not can_modify_project(self.request.user, step.project):
+            raise PermissionDenied("Vous ne pouvez pas modifier ce projet.")
+
+        serializer.save(step=step, author=self.request.user)
 
         log_project_activity(
             project=step.project,
@@ -350,9 +469,8 @@ class StepCommentCreateAPIView(generics.CreateAPIView):
             user=self.request.user,
         )
 
-
 class CommentDetailUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
     serializer_class = InternalCommentUpdateSerializer
     queryset = Comment.objects.select_related("author", "step", "step__project")
 
@@ -407,7 +525,7 @@ class StepAttachmentCreateAPIView(generics.CreateAPIView):
 
 
 class AttachmentDetailUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsProjectRolePermission]
     serializer_class = AttachmentVisibilityUpdateSerializer
     queryset = Attachment.objects.select_related("step", "step__project")
 
@@ -443,3 +561,90 @@ class AttachmentDetailUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView)
             message=f"Pièce jointe supprimée : {file_name}",
             user=self.request.user,
         )
+
+class IsSuperuserOnly(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+@method_decorator(ensure_csrf_cookie, name="dispatch")
+class CSRFCookieView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        return Response({"detail": "CSRF cookie set"})
+
+
+class LoginAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        username = (request.data.get("username") or "").strip()
+        password = request.data.get("password") or ""
+
+        user = authenticate(request, username=username, password=password)
+
+        if not user:
+            return Response(
+                {"detail": "Identifiants invalides."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.is_active:
+            return Response(
+                {"detail": "Ce compte est désactivé."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        login(request, user)
+        data = AuthMeSerializer(user).data
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class LogoutAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        logout(request)
+        return Response({"detail": "Déconnexion réussie."}, status=status.HTTP_200_OK)
+
+
+class CurrentUserAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        if not request.user.is_authenticated:
+            return Response(
+                {"authenticated": False, "user": None},
+                status=status.HTTP_200_OK,
+            )
+
+        return Response(
+            {
+                "authenticated": True,
+                "user": AuthMeSerializer(request.user).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminUserListCreateAPIView(generics.ListCreateAPIView):
+    permission_classes = [IsSuperuserOnly]
+    serializer_class = AdminUserManagementSerializer
+
+    def get_queryset(self):
+        return User.objects.all().order_by("username")
+
+
+class AdminUserDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsSuperuserOnly]
+    serializer_class = AdminUserManagementSerializer
+    queryset = User.objects.all().order_by("username")
+
+    def perform_destroy(self, instance):
+        if instance.is_superuser:
+            raise ValidationError({"detail": "Impossible de supprimer un superuser depuis cette interface."})
+        instance.delete()
+
