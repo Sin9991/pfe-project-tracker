@@ -522,6 +522,19 @@ class ClientListSerializer(serializers.ModelSerializer):
         return obj.name
 
 
+class ClientOptionSerializer(serializers.ModelSerializer):
+    label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Client
+        fields = ["id", "name", "company", "label"]
+
+    def get_label(self, obj):
+        if obj.company:
+            return f"{obj.name} - {obj.company}"
+        return obj.name
+
+
 class ClientCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Client

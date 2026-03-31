@@ -1,14 +1,12 @@
 from django.contrib.auth import get_user_model
 from django.db.models import Q
-from django.utils import timezone
 from rest_framework import generics, permissions, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import authenticate, login, logout
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
-from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .models import AccessLog, Attachment, Client, Comment, Project, ProjectAccessLink, ProjectStep, ProjectStatus, log_project_activity
 from .serializers import (

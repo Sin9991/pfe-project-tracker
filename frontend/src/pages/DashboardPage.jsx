@@ -1,33 +1,5 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
-import { Link } from "react-router-dom";
-
-function getStatusLabel(status) {
-  const labels = {
-    draft: "Brouillon",
-    in_progress: "En cours",
-    completed: "Terminé",
-    delayed: "En retard",
-    blocked: "Bloqué",
-    cancelled: "Annulé",
-    not_started: "Non démarrée",
-  };
-
-  return labels[status] || status || "-";
-}
-
-function formatProgress(value) {
-  if (value === null || value === undefined || value === "") {
-    return "0.00%";
-  }
-
-  const numericValue = Number(value);
-  if (Number.isNaN(numericValue)) {
-    return `${value}%`;
-  }
-
-  return `${numericValue.toFixed(2)}%`;
-}
+import api from "../lib/api";
 
 function StatCard({ title, value }) {
   return (
@@ -42,7 +14,6 @@ function ProjectTable({ title, projects }) {
   return (
     <div className="panel">
       <h2>{title}</h2>
-
       {projects.length === 0 ? (
         <p className="empty">Aucune donnée.</p>
       ) : (
@@ -55,28 +26,17 @@ function ProjectTable({ title, projects }) {
               <th>Statut</th>
               <th>Avancement</th>
               <th>Responsable</th>
-              <th>Action</th>
             </tr>
           </thead>
-
           <tbody>
             {projects.map((project) => (
               <tr key={project.id}>
-                <td>{project.title || "-"}</td>
+                <td>{project.title}</td>
                 <td>{project.client_name || "-"}</td>
                 <td>{project.project_type || "-"}</td>
-                <td>
-                  <span className={`status-badge status-${project.status}`}>
-                    {getStatusLabel(project.status)}
-                  </span>
-                </td>
-                <td>{formatProgress(project.progress_percentage)}</td>
+                <td>{project.status}</td>
+                <td>{project.progress_percentage}%</td>
                 <td>{project.project_manager_name || "-"}</td>
-                <td>
-                  <Link to={`/projects/${project.id}`} className="table-link">
-                    Voir
-                  </Link>
-                </td>
               </tr>
             ))}
           </tbody>
@@ -89,32 +49,23 @@ function ProjectTable({ title, projects }) {
 export default function DashboardPage() {
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
-  const fetchDashboard = async ({ silent = false } = {}) => {
+  const fetchDashboard = async () => {
     try {
-      if (silent) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-
+      setLoading(true);
       setError("");
 
-      const response = await axios.get("/api/dashboard/", {
-        withCredentials: true,
-      });
+      const response = await api.get("/dashboard/");
 
       setDashboard(response.data);
     } catch (err) {
       setError(
         "Impossible de charger le dashboard. Vérifie que tu es connecté sur http://localhost:8000/admin/."
       );
-      console.error(err.response?.data || err);
+      console.error(err);
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   };
 
@@ -138,18 +89,6 @@ export default function DashboardPage() {
     );
   }
 
-  if (!dashboard) {
-    return (
-      <div className="page">
-        <p>Aucune donnée disponible.</p>
-      </div>
-    );
-  }
-
-  const stats = dashboard.stats || {};
-  const recentProjects = dashboard.recent_projects || [];
-  const attentionProjects = dashboard.attention_projects || [];
-
   return (
     <div className="page">
       <header className="header">
@@ -157,34 +96,27 @@ export default function DashboardPage() {
           <h1>Dashboard Admin</h1>
           <p>Suivi des projets techniques</p>
         </div>
-
-        <div className="header-actions">
-          <Link to="/projects/new" className="primary-link-button">
-            Nouveau projet
-          </Link>
-
-          <button
-            onClick={() => fetchDashboard({ silent: true })}
-            disabled={refreshing}
-          >
-            {refreshing ? "Rafraîchissement..." : "Rafraîchir"}
-          </button>
-        </div>
+        <button onClick={fetchDashboard}>Rafraîchir</button>
       </header>
 
       <section className="stats-grid">
-        <StatCard title="Total projets" value={stats.total_projects ?? 0} />
-        <StatCard title="Brouillons" value={stats.draft_projects ?? 0} />
-        <StatCard title="En cours" value={stats.in_progress_projects ?? 0} />
-        <StatCard title="Terminés" value={stats.completed_projects ?? 0} />
-        <StatCard title="En retard" value={stats.delayed_projects ?? 0} />
-        <StatCard title="Bloqués" value={stats.blocked_projects ?? 0} />
-        <StatCard title="Annulés" value={stats.cancelled_projects ?? 0} />
+        <StatCard title="Total projets" value={dashboard.stats.total_projects} />
+        <StatCard title="Brouillons" value={dashboard.stats.draft_projects} />
+        <StatCard title="En cours" value={dashboard.stats.in_progress_projects} />
+        <StatCard title="Terminés" value={dashboard.stats.completed_projects} />
+        <StatCard title="En retard" value={dashboard.stats.delayed_projects} />
+        <StatCard title="Bloqués" value={dashboard.stats.blocked_projects} />
       </section>
 
       <section className="panels-grid">
-        <ProjectTable title="Projets récents" projects={recentProjects} />
-        <ProjectTable title="Projets à surveiller" projects={attentionProjects} />
+        <ProjectTable
+          title="Projets récents"
+          projects={dashboard.recent_projects}
+        />
+        <ProjectTable
+          title="Projets à surveiller"
+          projects={dashboard.attention_projects}
+        />
       </section>
     </div>
   );

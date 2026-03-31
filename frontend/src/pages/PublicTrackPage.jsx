@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import axios from "axios";
 import { useParams } from "react-router-dom";
+import api from "../lib/api";
 
 function getStatusLabel(status) {
   const labels = {
@@ -9,7 +9,6 @@ function getStatusLabel(status) {
     completed: "Terminé",
     delayed: "En retard",
     blocked: "Bloqué",
-    cancelled: "Annulé",
     not_started: "Non démarrée",
   };
 
@@ -41,12 +40,6 @@ function PublicStepCard({ step }) {
           <span>Début réel : {step.actual_start_date || "-"}</span>
           <span>Fin réelle : {step.actual_end_date || "-"}</span>
         </div>
-
-        {step.status_reason && (
-          <div className="status-reason-box">
-            <strong>Cause signalée :</strong> {step.status_reason}
-          </div>
-        )}
 
         {step.comments?.length > 0 && (
           <div className="public-section">
@@ -92,7 +85,7 @@ export default function PublicTrackPage() {
       setLoading(true);
       setError("");
 
-      const response = await axios.get(`/api/public/project/${token}/`);
+      const response = await api.get(`/public/project/${token}/`);
       setProject(response.data);
     } catch (err) {
       setError("Lien invalide, inactif ou expiré.");
@@ -139,35 +132,44 @@ export default function PublicTrackPage() {
         </div>
       </header>
 
-      {project.status === "cancelled" && project.cancellation_reason && (
-        <section className="panel">
-          <h2>Projet annulé</h2>
-          <div className="status-reason-box">
-            <strong>Cause d’annulation :</strong> {project.cancellation_reason}
-          </div>
-        </section>
-      )}
-
       <section className="project-summary-grid">
         <div className="summary-card">
           <h3>Projet</h3>
-          <p><strong>Titre :</strong> {project.title}</p>
-          <p><strong>Type :</strong> {project.project_type || "-"}</p>
-          <p><strong>Statut :</strong> {getStatusLabel(project.status)}</p>
-          <p><strong>Avancement :</strong> {project.progress_percentage}%</p>
+          <p>
+            <strong>Titre :</strong> {project.title}
+          </p>
+          <p>
+            <strong>Type :</strong> {project.project_type || "-"}
+          </p>
+          <p>
+            <strong>Statut :</strong> {getStatusLabel(project.status)}
+          </p>
+          <p>
+            <strong>Avancement :</strong> {project.progress_percentage}%
+          </p>
         </div>
 
         <div className="summary-card">
           <h3>Client</h3>
-          <p><strong>Nom :</strong> {project.client_name || "-"}</p>
-          <p><strong>Société :</strong> {project.client_company || "-"}</p>
+          <p>
+            <strong>Nom :</strong> {project.client_name || "-"}
+          </p>
+          <p>
+            <strong>Société :</strong> {project.client_company || "-"}
+          </p>
         </div>
 
         <div className="summary-card">
           <h3>Dates</h3>
-          <p><strong>Début :</strong> {project.start_date || "-"}</p>
-          <p><strong>Fin prévue :</strong> {project.expected_end_date || "-"}</p>
-          <p><strong>Fin réelle :</strong> {project.actual_end_date || "-"}</p>
+          <p>
+            <strong>Début :</strong> {project.start_date || "-"}
+          </p>
+          <p>
+            <strong>Fin prévue :</strong> {project.expected_end_date || "-"}
+          </p>
+          <p>
+            <strong>Fin réelle :</strong> {project.actual_end_date || "-"}
+          </p>
         </div>
       </section>
 

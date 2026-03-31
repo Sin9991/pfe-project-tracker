@@ -1,17 +1,27 @@
 
 from pathlib import Path
-
+import os
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+load_dotenv(BASE_DIR / ".env")
 
 
-SECRET_KEY = 'django-insecure-u)5rq=s!4t_uzu%qs7txw$oi2im5&8zx)w39k+tj!-&!r@35!!'
+def env_bool(name, default=False):
+    value = os.getenv(name, str(default))
+    return value.lower() in {"1", "true", "yes", "on"}
 
 
-DEBUG = True
+def env_list(name, default=""):
+    value = os.getenv(name, default)
+    return [item.strip() for item in value.split(",") if item.strip()]
 
-ALLOWED_HOSTS = []
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only")
+
+DEBUG = env_bool("DJANGO_DEBUG", True)
+
+ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost")
 
 
 
@@ -65,15 +75,11 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",
-        "NAME": "pfe_project_tracker",
-        "USER": "pfe_user",
-        "PASSWORD": "root123",
-        "HOST": "127.0.0.1",
-        "PORT": "3306",
-        "OPTIONS": {
-            "init_command": "SET sql_mode='STRICT_TRANS_TABLES', default_storage_engine=INNODB",
-            "isolation_level": "read committed",
-        },
+        "NAME": os.getenv("DB_NAME", "pfe_tracker"),
+        "USER": os.getenv("DB_USER", "pfe_user"),
+        "PASSWORD": os.getenv("DB_PASSWORD", ""),
+        "HOST": os.getenv("DB_HOST", "127.0.0.1"),
+        "PORT": os.getenv("DB_PORT", "3306"),
     }
 }
 
@@ -107,12 +113,16 @@ USE_TZ = True
 
 
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
 ]
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:5173",
-]
+CSRF_TRUSTED_ORIGINS = env_list(
+    "DJANGO_CSRF_TRUSTED_ORIGINS",
+    "http://127.0.0.1:5173,http://localhost:5173"
+)
+
+
+STATIC_ROOT = BASE_DIR / "staticfiles"

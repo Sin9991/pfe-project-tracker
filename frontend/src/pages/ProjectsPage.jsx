@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import axios from "axios";
+import api from "../lib/api";
 
 export default function ProjectsPage() {
   const [projects, setProjects] = useState([]);
@@ -14,9 +14,7 @@ export default function ProjectsPage() {
       setLoading(true);
       setError("");
 
-      const response = await axios.get("/api/projects/", {
-        withCredentials: true,
-      });
+      const response = await api.get("/projects/");
 
       setProjects(response.data);
       setFilteredProjects(response.data);
@@ -74,18 +72,19 @@ export default function ProjectsPage() {
   return (
     <div className="page">
       <header className="header">
-  <div>
-    <h1>Liste des projets</h1>
-    <p>Vue d’ensemble de tous les projets</p>
-  </div>
+        <div>
+          <h1>Liste des projets</h1>
+          <p>Vue d’ensemble de tous les projets</p>
+        </div>
 
-  <div className="header-actions">
-    <Link to="/projects/new" className="primary-link-button">
-      Nouveau projet
-    </Link>
-    <button onClick={fetchProjects}>Rafraîchir</button>
-  </div>
-</header>
+        <div className="header-actions">
+          <Link to="/projects/new" className="primary-link-button">
+            Nouveau projet
+          </Link>
+          <button onClick={fetchProjects}>Rafraîchir</button>
+        </div>
+      </header>
+
       <div className="toolbar">
         <input
           type="text"
@@ -100,41 +99,41 @@ export default function ProjectsPage() {
           <p className="empty">Aucun projet trouvé.</p>
         ) : (
           <table>
-              <thead>
-  <tr>
-    <th>ID</th>
-    <th>Titre</th>
-    <th>Client</th>
-    <th>Type</th>
-    <th>Statut</th>
-    <th>Avancement</th>
-    <th>Responsable</th>
-    <th>Début</th>
-    <th>Fin prévue</th>
-    <th>Action</th>
-  </tr>
-</thead>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Titre</th>
+                <th>Client</th>
+                <th>Type</th>
+                <th>Statut</th>
+                <th>Avancement</th>
+                <th>Responsable</th>
+                <th>Début</th>
+                <th>Fin prévue</th>
+                <th>Action</th>
+              </tr>
+            </thead>
 
-           <tbody>
-  {filteredProjects.map((project) => (
-    <tr key={project.id}>
-      <td>{project.id}</td>
-      <td>{project.title}</td>
-      <td>{project.client_name || "-"}</td>
-      <td>{project.project_type || "-"}</td>
-      <td>{project.status}</td>
-      <td>{project.progress_percentage}%</td>
-      <td>{project.project_manager_name || "-"}</td>
-      <td>{project.start_date || "-"}</td>
-      <td>{project.expected_end_date || "-"}</td>
-      <td>
-        <Link to={`/projects/${project.id}`} className="table-link">
-          Voir
-        </Link>
-      </td>
-    </tr>
-  ))}
-</tbody>
+            <tbody>
+              {filteredProjects.map((project) => (
+                <tr key={project.id}>
+                  <td>{project.id}</td>
+                  <td>{project.title}</td>
+                  <td>{project.client_name || "-"}</td>
+                  <td>{project.project_type || "-"}</td>
+                  <td>{project.status}</td>
+                  <td>{project.progress_percentage}%</td>
+                  <td>{project.project_manager_name || "-"}</td>
+                  <td>{project.start_date || "-"}</td>
+                  <td>{project.expected_end_date || "-"}</td>
+                  <td>
+                    <Link to={`/projects/${project.id}`} className="table-link">
+                      Voir
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
           </table>
         )}
       </div>
